@@ -1,0 +1,25 @@
+Package: siRNASeqEva
+Type: Package
+Title: A sequence-based method to evaluate the effectiveness of siRNA in human and other models
+Version: 0.1.0
+Author: Guofeng Meng
+Maintainer: Guofeng Meng <menggf@gmail.com>
+Description: A sequence-based method to evaluate the effectiveness of siRNA in human and other models
+License: GLP-3
+Encoding: UTF-8
+LazyData: true
+Depends:
+    R (>= 4.1.0)
+Imports:
+    parallel,
+    data.table,
+    Rsamtools,
+    GenomicRanges,
+    rtracklayer,
+    Rbowtie,
+    GenomicAlignments,
+    stringr,
+    dplyr
+Suggests:
+  knitr
+RoxygenNote: 7.3.1
