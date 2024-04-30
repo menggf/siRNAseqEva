@@ -10,6 +10,7 @@
 #' @import Rbowtie
 #' @import GenomicAlignments
 #' @import stringr
+#' @import dplyr
 #'
 #' @param sirna A data.frame object, with at least two columns of "id","antisense"
 #' @param bam.files One or multiple bam file. sorted and indexed bam are recommended
@@ -37,11 +38,15 @@
 
 
 
-siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_location=NULL, tmp_dir="temp", remove_header=1, remove_overhang=2, paired=TRUE, num_threads=1){
+siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene_symbol=NULL, genomic_location=NULL, tmp_dir="temp", remove_header=1, remove_overhang=2, paired=TRUE, num_threads=1){
     gr_target=NULL
     if(!is.null(gtf_file) ){
-        if(!is.null(gene)){
-            gtf <- unique(subset(as.data.frame(rtracklayer::import(gtf_file))[, c("seqnames","start","end","width","strand","type","gene_id","transcript_id")], type=="exon" & gene_id==gene))
+        if(!is.null(gene_symbol)){
+             gtf <- as.data.table(rtracklayer::import(gtf_file))[,1:20]
+             if(!"gene_name" %in% names(gtf) & "gene" %in% names(gtf))
+               gtf$gene_name=as.vector(gtf$gene)
+             gtf = gtf[ gene_name ==gene_symbol & type=="exon"]
+             
             gr_target=makeGRangesFromDataFrame(data.frame(chr=unique(gtf$seqnames), start=min(gtf$start), end=max(gtf$end),strand="+"))
         }
     }else{
@@ -65,10 +70,13 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_l
     which <- gr_target
     what <- c("qname", "rname","strand", "pos", "qwidth", "cigar","seq")
     param <- ScanBamParam(which=which, what=what, flag=scanBamFlag(isUnmappedQuery=FALSE))
+    tmp_dir=sub("/$","",tmp_dir)
+    if(!dir.exists(tmp_dir))
+        dir.create(tmp_dir)
     if(length(bam.files)==1){
         if(!file.exists(paste0(bam.files,".bai"))){
-                out_ff=paste0(sub(".bam","",bam.files), "_sorted")
-                out_ff2=paste0(sub(".bam","",bam.files), "_sorted.bam")
+                out_ff=paste0(sub(".bam$","",bam.files), "_sorted")
+                out_ff2=paste0(sub(".bam$","",bam.files), "_sorted.bam")
                 sortBam(bam.files, out_ff, nThreads=num_threads)
                 indexBam(out_ff2)
                 in_bam=scanBam(out_ff2, param=param)[[1]]
@@ -90,8 +98,8 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_l
     }else{
         new.bam.files=sapply(bam.files, function(ff){
              if(!file.exists(paste0(ff,".bai"))){
-                out_ff=paste0(sub(".bam","",ff), "_sorted")
-                out_ff2=paste0(sub(".bam","",ff), "_sorted.bam")
+                out_ff=paste0(sub(".bam$","",ff), "_sorted")
+                out_ff2=paste0(sub(".bam$","",ff), "_sorted.bam")
                 sortBam(ff, out_ff, nThreads=num_threads)
                 indexBam(out_ff2)
                 return(out_ff2)
@@ -99,7 +107,7 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_l
                 return(ff)
              }
         })
-        out_file=mergeBam(new.bam.files, paste0(tmp_dir,"/merged_bam"), region=gr_target, indexDestination=TRUE, overwrite=TRUE)
+        out_file=mergeBam(new.bam.files, destination=paste0(tmp_dir,"/merged_bam"), region=gr_target, indexDestination=TRUE, overwrite=TRUE)
         in_bam=scanBam(out_file, param=param)[[1]]
         if(paired){
           gal<-readGAlignmentPairs(out_file, param=param)
@@ -122,8 +130,6 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_l
     read_cigar$star=as.vector(bam_df$star)
     row.names(read_cigar)<-as.vector(bam_df$seq_name)
 
-    if(!dir.exists(tmp_dir))
-        dir.create(tmp_dir)
     write.table(paste(paste0(">",as.vector(bam_df$seq_name)), as.vector(bam_df$seqs), sep="\n"), paste0(tmp_dir,"/reads_fasta.fa"),row.names=F,col.name=F,quote=F)
     reference_build_report2 <- bowtie_build(references=paste0(tmp_dir,"/reads_fasta.fa"), outdir=tmp_dir, prefix="reads", force=TRUE, threads=num_threads)
     if(is.data.frame(sirna)){
@@ -175,7 +181,7 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_l
             break()
     }
     res$map_loc=vpos
-    rm(wh0, wh1, wh2, wh3, wh4, wh5, spos, vpos,)
+    rm(wh0, wh1, wh2, wh3, wh4, wh5, spos, vpos)
 
     mismatch2=unlist(mclapply(as.vector(res$V8), function(x) {
       if(x=="")
@@ -188,6 +194,7 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_l
 
 
     mapping_info=bind_rows(mclapply(as.vector(sirna$id), function(sr){
+        #print(sr)
         sub.res=subset(res, V1==sr)
         locs=unique(as.vector(sub.res$map_loc) )
         locs=locs[locs!=-1]
@@ -205,18 +212,15 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene=NULL, genomic_l
             out[,4]=out[,4] +out[,3]
             cbind(data.frame(id=sr, chr=as.vector(seqnames(gr_target)) , map_loc=locs, coverage=cv), out)
         }else{
-            out=as.vector(table(subset(sub.res, map_loc==lc)$mismatch)[c("0","1","2","3")])
+            out=as.vector(table(subset(sub.res, map_loc==locs)$mismatch)[c("0","1","2","3")])
             out[is.na(out)]=0
             out[2]=out[2] +out[1]
             out[3]=out[3] +out[2]
             out[4]=out[4] +out[3]
             data.frame(id=sr, chr=as.vector(seqnames(gr_target)) , map_loc=locs, coverage=cv, Mismatch0=out[1],Mismatch1=out[2],Mismatch2=out[3],Mismatch3=out[4])
         }
-    }, mc.cores=10))
+    }, mc.cores=num_threads))
 
     mapping_info=mapping_info[as.vector(mapping_info$Mismatch3)/(1+ as.vector(mapping_info$coverage)) > 0.1 & as.vector(mapping_info$coverage) > 10,]
     return(mapping_info)
 }
-
-
-
