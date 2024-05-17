@@ -40,15 +40,17 @@
 
 siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene_symbol=NULL, genomic_location=NULL, tmp_dir="temp", remove_header=1, remove_overhang=2, paired=TRUE, num_threads=1, add_chr=FALSE){
     gr_target=NULL
+    final_gtf=NULL
     if(!is.null(gtf_file) ){
         if(!is.null(gene_symbol)){
              gtf <- as.data.table(rtracklayer::import(gtf_file))
              if(!"gene_name" %in% names(gtf) & "gene" %in% names(gtf))
                gtf$gene_name=as.vector(gtf$gene)
-             gtf = gtf[ gene_name ==gene_symbol & type=="exon"]
+             gtf = gtf[ gene_name ==gene_symbol & (type=="exon" | type=="five_prime_utr"| type=="three_prime_utr")]
+             final_gtf=gtf
              chrs=unique(gtf$seqnames)
              if(add_chr)
-				chrs=paste0("chr", chrs)
+				        chrs=paste0("chr", chrs)
             gr_target=makeGRangesFromDataFrame(data.frame(chr=chrs, start=min(gtf$start-1000), end=max(gtf$end+1000),strand="+"))
         }
     }else{
@@ -75,6 +77,7 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene_symbol=NULL, ge
     tmp_dir=sub("/$","",tmp_dir)
     if(!dir.exists(tmp_dir))
         dir.create(tmp_dir)
+    used_bam_file=NULL
     if(length(bam.files)==1){
         param <- ScanBamParam(which=which, what=what, flag=scanBamFlag(isUnmappedQuery=FALSE))
         if(!file.exists(paste0(bam.files,".bai"))){
@@ -83,6 +86,7 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene_symbol=NULL, ge
                 sortBam(bam.files, out_ff, nThreads=num_threads)
                 indexBam(out_ff2)
                 in_bam=scanBam(out_ff2, param=param)[[1]]
+                used_bam_file=out_ff2
                 if(paired){
                   gal<-readGAlignmentPairs(out_ff2, param=param)
                 }else{
@@ -91,6 +95,7 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene_symbol=NULL, ge
 
             }else{
                 in_bam=scanBam(bam.files, param=param)[[1]]
+                used_bam_file=files
                 if(paired){
                   gal<-readGAlignmentPairs(bam.files, param=param)
                 }else{
@@ -113,6 +118,7 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene_symbol=NULL, ge
         param <- ScanBamParam( what=what, flag=scanBamFlag(isUnmappedQuery=FALSE))
         out_file=mergeBam(new.bam.files, destination=paste0(tmp_dir,"/merged_bam.bam"), region=gr_target, indexDestination=TRUE, overwrite=TRUE)
         in_bam=scanBam(out_file, param=param)[[1]]
+        used_bam_file=out_file
         if(paired){
           gal<-readGAlignmentPairs(out_file,param=param)
         }else{
@@ -229,63 +235,130 @@ siRNASeqEva<-function(sirna, bam.files=NULL, gtf_file=NULL, gene_symbol=NULL, ge
     if(length(mapping_info)==0)
       return(NULL)
     mapping_info=bind_rows(mapping_info)
-    
     mapping_info=mapping_info[as.vector(mapping_info$Mismatch3)/(1+ as.vector(mapping_info$coverage)) > 0.1 & as.vector(mapping_info$coverage) > 3,]
-    return(mapping_info)
+    outcome=list(mapping_info=mapping_info, sirna=sirna, gtf=final_gtf, ranges=gr_target, bam = used_bam_file)
+    return(outcome)
 }
 
 
 
-filter_redundency <-function(x, ordered=TRUE){
-  allids=unique(as.vector(x$id))
-  
+filter_redundency <-function(obj, ordered=TRUE){
+	allids=unique(as.vector(obj$sirna$id))
 	xx=dplyr::bind_rows(lapply(allids, function(ii){
-    sub.x=subset(x, id==ii)
-    match0=as.vector(sub.x$Mismatch0)
-    if(any(match0 > 1)){
-      sub.x=subset(sub.x, Mismatch0 > 1)
-    }
-    
-    if(nrow(sub.x)==1)
+		sub.x=subset(obj$mapping_info, id==ii)
+		if(nrow(sub.x)==0){
+			return(data.frame(id=ii, chr=NA, map_loc=NA, coverage=0, Mismatch0=0, Mismatch1=0, Mismatch2=0, Mismatch3=0, mark="NF"))
+		}
+		match0=as.vector(sub.x$Mismatch0)
+		if(any(match0 > 3)){
+			sub.x=subset(sub.x, Mismatch0 > 3)
+		}
+		sub.x$mark="UN"
+		if(nrow(sub.x)==1)
 			return(sub.x)
-    has.pos=as.vector(sub.x$map_loc)
-    wh=which(allids==ii)
-    
-    left.tag1=wh-30
-    right.tag1=wh+10
-    left.tag2=wh-10
-    right.tag2=wh+30
-    
-    
-    if(right.tag1 > length(allids))
-      right.tag1 = length(allids)
-    if(right.tag2 > length(allids))
-      right.tag2 = length(allids)
-      
-    if(left.tag1 <0)
-      left.tag1=1
-    if(left.tag2 <0)
-      left.tag2=1
-      
-    rg1=left.tag1:right.tag1
-    rg2=left.tag1:right.tag2 
-    
-    nearby.id1=allids[rg1]
-    nearby.id2=allids[rg2]
-    
-    nearby.pos1=as.vector(subset(x, id%in%nearby.id1)$map_loc)
-    nearby.pos2=as.vector(subset(x, id%in%nearby.id2)$map_loc)
-    sel=which.min(abs(sapply(has.pos, function(pos) min(mean(nearby.pos1-pos), mean(nearby.pos2-pos)))))
-    return(sub.x[sel,])
-  }))
-  max.pos=which.max(as.vector(as.numeric(sub("Pos","", allids, ignore.case=TRUE))))
-	row.names(xx)<-toupper(as.vector(xx$id))
-	xx=xx[toupper(paste0("Pos",1:max.pos)),]
-	row.names(xx)<-toupper(paste0("Pos",1:max.pos))
-  xx$coverage[is.na(xx$coverage)]=0
-  xx$Mismatch0[is.na(xx$Mismatch0)]=0
-  xx$Mismatch1[is.na(xx$Mismatch1)]=0
-  xx$Mismatch2[is.na(xx$Mismatch2)]=0
-  xx$Mismatch3[is.na(xx$Mismatch3)]=0
-  xx
+		match1=as.vector(sub.x$Mismatch1)
+		match0=as.vector(sub.x$Mismatch0)
+		max.match1=max(match1)
+		wh=which(match0/match1 > 0.8  &  match1 > max.match1 * 0.6)
+		if(length(wh[wh])==1){
+			return(sub.x[wh,])
+		}
+		if(length(wh[wh])>1){
+			sub.x=sub.x[wh,]
+		}
+		has.pos=as.vector(sub.x$map_loc)
+		wh=which(allids==ii)
+		left.tag1=wh-30
+		right.tag1=wh+10
+		left.tag2=wh-10
+		right.tag2=wh+30
+		if(right.tag1 > length(allids))
+			right.tag1 = length(allids)
+		if(right.tag2 > length(allids))
+			right.tag2 = length(allids)
+		if(left.tag1 <0)
+			left.tag1=1
+		if(left.tag2 <0)
+			left.tag2=1
+		  
+		rg1=left.tag1:right.tag1
+		rg2=left.tag1:right.tag2 
+		
+		nearby.id1=allids[rg1]
+		nearby.id2=allids[rg2]
+		
+		nearby.pos1=as.vector(subset(obj$mapping_info, id%in%nearby.id1)$map_loc)
+		nearby.pos2=as.vector(subset(obj$mapping_info, id%in%nearby.id2)$map_loc)
+		sel=which.min(abs(sapply(has.pos, function(pos) min(mean(nearby.pos1-pos), mean(nearby.pos2-pos)))))
+		sel.x=sub.x[sel,]
+		if(as.vector(sel.x$Mismatch0)/as.vector(sel.x$Mismatch3) < 0.6){
+			sub.x$mark="DU"
+			return(sub.x)
+		}
+		return(sel.x)
+	}))
+	
+	obj$refined_mapping_info=xx
+	return(obj)
+}
+
+plot_siRNA<-function(obj, transcript=c("ENST00000349496","ENST00000396185"), chromosome=NULL, from=NULL, to=NULL, ratio_mismatch=0.6){
+	gtf=obj$gtf
+	sub.gtf=gtf[gtf$transcript_id %in% transcript,]
+	
+	if(is.null(chromosome))
+		chromosome=unique(as.vector(sub.gtf$seqnames))
+	if(is.null(from))
+		from=min(as.vector(sub.gtf$start))
+	if(is.null(to))
+		to=max(as.vector(sub.gtf$end))
+	# mapping track
+	sub.zz2=subset(obj$refined_mapping_info, !is.na(map_loc))
+	sub.zz2$start=as.vector(sub.zz2$map_loc)
+	sub.zz2$end=as.vector(sub.zz2$map_loc) +0
+	tps=apply(sub.zz2,1, function(x) {
+		if(x["Mismatch3"]==0)
+			return("No match")
+		if(as.numeric(x["Mismatch2"])/as.numeric(x["Mismatch3"]) <=ratio_mismatch)
+			return("Mismatch3")
+		if(as.numeric(x["Mismatch1"])/as.numeric(x["Mismatch3"]) <=ratio_mismatch)
+			return("Mismatch2")
+		if(as.numeric(x["Mismatch0"])/as.numeric(x["Mismatch3"]) <=ratio_mismatch)
+			return("Mismatch1")
+		return("Full")
+	})
+	sub.zz2$tps=tps
+	input=makeGRangesFromDataFrame(sub.zz2, keep.extra.columns=TRUE)
+	options(ucscChromosomeNames = FALSE)
+	aTrack <- AnnotationTrack(input, group=tps, feature=tps, stacking="full", name="siRNA",groupAnnotation="group",just.group = "above")
+  
+	# gtf track
+	
+	gtf.gr=makeGRangesFromDataFrame(sub.gtf, keep.extra.columns=TRUE)
+	GeneTrack=GeneRegionTrack(range=gtf.gr,  stacking="full", name="Gene", transcript=as.vector(gtf.gr$transcript_id), gene=as.vector(gtf.gr$transcript_id),showId=TRUE )
+	
+	# bam coverage track
+	coverageTrack <- DataTrack(range=obj$bam,  name="Coverage", chromosome=chromosome, type = "histogram")
+	
+	#snp track
+	snp=fread("/data/meng/database/snp/snp.txt",skip=1, header=F)
+	names(snp)<-c("chr","start","end","snp")
+	sub.snp=unique(subset(snp, chr==chromosome | chr==paste0("chr",chromosome) & start >=from & end <= to,1:3))
+	if(nrow(sub.snp)!=0){
+		sub.snp$chr=chromosome
+		sub.snp$end=as.vector(sub.snp$start)
+		gr.snp=makeGRangesFromDataFrame(sub.snp, keep.extra.columns=TRUE) 
+		gr.snp=gr.snp[unique(queryHits(findOverlaps(gr.snp, gtf.gr)))]
+		 
+		snpTrack <- AnnotationTrack(gr.snp,  name="SNP")
+		displayPars(snpTrack) <- list(fill="red",col="red")
+	}else{
+		gr.snp=makeGRangesFromDataFrame(sub.snp, keep.extra.columns=TRUE) 
+		snpTrack <- AnnotationTrack(gr.snp,  name="SNP")
+	}   
+  
+	htTrack <- HighlightTrack(trackList = list(aTrack,snpTrack), start = start(gr.snp), width = 1, chromosome = chromosome, fill="yellow")
+	displayPars(htTrack) <- list(fill="lightgreen",col="lightgreen")                     
+	plotTracks(list(htTrack,coverageTrack, GeneTrack), chromosome=chromosome, from=from, to=to, Mismatch1 = "darkred", Mismatch0 = "darkgreen", Mismatch2 = "brown", Full="cornflowerblue", just.group = "above",sizes=c(3,0.3,0.5,0.5),transcriptAnnotation = "transcript")
+  
 }
